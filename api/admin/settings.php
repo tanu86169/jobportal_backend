@@ -1,14 +1,18 @@
+
 <?php
 
 /*
 |--------------------------------------------------------------------------
 | ADMIN SETTINGS API
 |--------------------------------------------------------------------------
-| GET  -> All settings fetch
-| PUT  -> Settings update / insert
+| GET  -> Fetch all settings
+| PUT  -> Insert or update settings
 |--------------------------------------------------------------------------
 */
 
+ini_set("display_errors", "0");
+ini_set("log_errors", "1");
+error_reporting(E_ALL);
 
 /*
 |--------------------------------------------------------------------------
@@ -19,23 +23,28 @@
 $allowedOrigins = [
     "http://localhost:5173",
     "http://localhost:5174",
+    "http://192.168.1.50:5173",
+    "http://192.168.1.50:5174",
+
+    // Replace with your actual deployed frontend origin
+    "https://YOUR-FRONTEND-DOMAIN"
 ];
 
 $origin = $_SERVER["HTTP_ORIGIN"] ?? "";
 
 if (in_array($origin, $allowedOrigins, true)) {
     header("Access-Control-Allow-Origin: " . $origin);
+    header("Access-Control-Allow-Credentials: true");
+    header("Vary: Origin");
 }
 
 header("Access-Control-Allow-Methods: GET, PUT, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
-header("Access-Control-Allow-Credentials: true");
 header("Content-Type: application/json; charset=UTF-8");
-
 
 /*
 |--------------------------------------------------------------------------
-| OPTIONS / PREFLIGHT
+| PREFLIGHT
 |--------------------------------------------------------------------------
 */
 
@@ -44,6 +53,24 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") {
     exit;
 }
 
+/*
+|--------------------------------------------------------------------------
+| ALLOWED METHODS
+|--------------------------------------------------------------------------
+*/
+
+$method = $_SERVER["REQUEST_METHOD"] ?? "GET";
+
+if (!in_array($method, ["GET", "PUT"], true)) {
+    http_response_code(405);
+
+    echo json_encode([
+        "success" => false,
+        "message" => "Method not allowed"
+    ]);
+
+    exit;
+}
 
 /*
 |--------------------------------------------------------------------------
@@ -53,61 +80,74 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") {
 
 require_once "../../config/database.php";
 
-
 /*
 |--------------------------------------------------------------------------
 | DEFAULT SETTINGS
 |--------------------------------------------------------------------------
-| Agar database me setting missing hai to ye default values use hongi.
-|--------------------------------------------------------------------------
 */
 
 $defaultSettings = [
-
     [
-        "setting_key"   => "site_name",
+        "setting_key" => "site_name",
         "setting_value" => "JobPortal",
-        "setting_type"  => "text",
-        "description"   => "Website name"
+        "setting_type" => "text",
+        "description" => "Website name"
     ],
-
     [
-        "setting_key"   => "site_email",
+        "setting_key" => "site_email",
         "setting_value" => "",
-        "setting_type"  => "email",
-        "description"   => "Website contact email"
+        "setting_type" => "email",
+        "description" => "Website contact email"
     ],
-
     [
-        "setting_key"   => "site_phone",
+        "setting_key" => "site_phone",
         "setting_value" => "",
-        "setting_type"  => "text",
-        "description"   => "Website contact phone"
+        "setting_type" => "text",
+        "description" => "Website contact phone"
     ],
-
     [
-        "setting_key"   => "maintenance_mode",
+        "setting_key" => "maintenance_mode",
         "setting_value" => "0",
-        "setting_type"  => "boolean",
-        "description"   => "Enable or disable website maintenance mode"
+        "setting_type" => "boolean",
+        "description" => "Enable or disable website maintenance mode"
     ],
-
     [
-        "setting_key"   => "allow_registration",
+        "setting_key" => "allow_registration",
         "setting_value" => "1",
-        "setting_type"  => "boolean",
-        "description"   => "Allow new users to register"
+        "setting_type" => "boolean",
+        "description" => "Allow new users to register"
     ],
-
     [
-        "setting_key"   => "allow_job_posting",
+        "setting_key" => "allow_job_posting",
         "setting_value" => "1",
-        "setting_type"  => "boolean",
-        "description"   => "Allow recruiters to post jobs"
+        "setting_type" => "boolean",
+        "description" => "Allow recruiters to post jobs"
     ]
-
 ];
 
+/*
+|--------------------------------------------------------------------------
+| HELPER: JSON RESPONSE
+|--------------------------------------------------------------------------
+*/
+
+function sendJson($statusCode, $data)
+{
+    http_response_code($statusCode);
+
+    echo json_encode(
+        $data,
+        JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+    );
+
+    exit;
+}
+
+/*
+|--------------------------------------------------------------------------
+| MAIN API
+|--------------------------------------------------------------------------
+*/
 
 try {
 
@@ -117,9 +157,9 @@ try {
     |--------------------------------------------------------------------------
     */
 
-    if ($_SERVER["REQUEST_METHOD"] === "GET") {
+    if ($method === "GET") {
 
-        $sql = "
+        $result = $conn->query("
             SELECT
                 id,
                 setting_key,
@@ -129,30 +169,17 @@ try {
                 updated_at
             FROM admin_settings
             ORDER BY id ASC
-        ";
-
-        $result = $conn->query($sql);
+        ");
 
         if (!$result) {
-            throw new Exception(
-                "Failed to fetch settings: " . $conn->error
-            );
+            throw new Exception("Failed to fetch settings");
         }
 
         $databaseSettings = [];
 
         while ($row = $result->fetch_assoc()) {
-
             $databaseSettings[$row["setting_key"]] = $row;
-
         }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | MERGE DATABASE SETTINGS WITH DEFAULT SETTINGS
-        |--------------------------------------------------------------------------
-        */
 
         $settings = [];
 
@@ -161,105 +188,95 @@ try {
             $key = $default["setting_key"];
 
             if (isset($databaseSettings[$key])) {
-
                 $settings[] = $databaseSettings[$key];
+                continue;
+            }
 
-            } else {
+            // Insert a missing default setting
+            $stmt = $conn->prepare("
+                INSERT INTO admin_settings
+                    (setting_key, setting_value, setting_type, description)
+                VALUES (?, ?, ?, ?)
+            ");
 
-                /*
-                |--------------------------------------------------------------
-                | Missing setting database me create kar do
-                |--------------------------------------------------------------
-                */
+            if (!$stmt) {
+                throw new Exception("Failed to prepare default setting");
+            }
 
-                $stmt = $conn->prepare("
-                    INSERT INTO admin_settings
-                    (
-                        setting_key,
-                        setting_value,
-                        setting_type,
-                        description
-                    )
-                    VALUES (?, ?, ?, ?)
-                ");
+            $stmt->bind_param(
+                "ssss",
+                $default["setting_key"],
+                $default["setting_value"],
+                $default["setting_type"],
+                $default["description"]
+            );
 
-                if (!$stmt) {
-                    throw new Exception($conn->error);
-                }
-
-                $stmt->bind_param(
-                    "ssss",
-                    $default["setting_key"],
-                    $default["setting_value"],
-                    $default["setting_type"],
-                    $default["description"]
-                );
-
-                $stmt->execute();
-
-                $newId = $stmt->insert_id;
-
+            if (!$stmt->execute()) {
                 $stmt->close();
 
+                // Another request may have inserted this key.
+                $check = $conn->prepare("
+                    SELECT id, setting_key, setting_value,
+                           setting_type, description, updated_at
+                    FROM admin_settings
+                    WHERE setting_key = ?
+                    LIMIT 1
+                ");
 
-                /*
-                |--------------------------------------------------------------
-                | Newly created setting response me add karo
-                |--------------------------------------------------------------
-                */
-
-                $settings[] = [
-                    "id"            => $newId,
-                    "setting_key"   => $default["setting_key"],
-                    "setting_value" => $default["setting_value"],
-                    "setting_type"  => $default["setting_type"],
-                    "description"   => $default["description"],
-                    "updated_at"    => date("Y-m-d H:i:s")
-                ];
-
-            }
-
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | EXTRA SETTINGS
-        |--------------------------------------------------------------------------
-        | Agar database me future me koi extra setting add ho,
-        | to usko bhi response me include karenge.
-        |--------------------------------------------------------------------------
-        */
-
-        foreach ($databaseSettings as $key => $databaseSetting) {
-
-            $alreadyExists = false;
-
-            foreach ($settings as $setting) {
-
-                if ($setting["setting_key"] === $key) {
-                    $alreadyExists = true;
-                    break;
+                if (!$check) {
+                    throw new Exception("Failed to check setting");
                 }
 
+                $check->bind_param("s", $key);
+                $check->execute();
+
+                $existing = $check->get_result()->fetch_assoc();
+                $check->close();
+
+                if (!$existing) {
+                    throw new Exception("Failed to insert default setting");
+                }
+
+                $settings[] = $existing;
+                continue;
             }
 
-            if (!$alreadyExists) {
-                $settings[] = $databaseSetting;
-            }
+            $newId = $conn->insert_id;
+            $stmt->close();
 
+            $settings[] = [
+                "id" => $newId,
+                "setting_key" => $default["setting_key"],
+                "setting_value" => $default["setting_value"],
+                "setting_type" => $default["setting_type"],
+                "description" => $default["description"],
+                "updated_at" => date("Y-m-d H:i:s")
+            ];
         }
 
+        // Include any additional settings already in the database.
+        foreach ($databaseSettings as $key => $dbSetting) {
 
-        echo json_encode([
-            "success"  => true,
-            "total"    => count($settings),
+            $exists = false;
+
+            foreach ($settings as $setting) {
+                if ($setting["setting_key"] === $key) {
+                    $exists = true;
+                    break;
+                }
+            }
+
+            if (!$exists) {
+                $settings[] = $dbSetting;
+            }
+        }
+
+        sendJson(200, [
+            "success" => true,
+            "total" => count($settings),
             "settings" => $settings
         ]);
-
-        exit;
     }
-
 
     /*
     |--------------------------------------------------------------------------
@@ -267,85 +284,45 @@ try {
     |--------------------------------------------------------------------------
     */
 
-    if ($_SERVER["REQUEST_METHOD"] === "PUT") {
+    if ($method === "PUT") {
 
         $rawData = file_get_contents("php://input");
-
         $data = json_decode($rawData, true);
 
-
-        /*
-        |--------------------------------------------------------------------------
-        | JSON VALIDATION
-        |--------------------------------------------------------------------------
-        */
-
-        if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
-
-            http_response_code(400);
-
-            echo json_encode([
+        if (
+            json_last_error() !== JSON_ERROR_NONE ||
+            !is_array($data)
+        ) {
+            sendJson(400, [
                 "success" => false,
                 "message" => "Invalid JSON data"
             ]);
-
-            exit;
         }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | SETTINGS VALIDATION
-        |--------------------------------------------------------------------------
-        */
 
         if (
             !isset($data["settings"]) ||
             !is_array($data["settings"])
         ) {
-
-            http_response_code(400);
-
-            echo json_encode([
+            sendJson(400, [
                 "success" => false,
                 "message" => "Settings data is required"
             ]);
-
-            exit;
         }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | TRANSACTION START
-        |--------------------------------------------------------------------------
-        */
 
         $conn->begin_transaction();
 
         try {
 
             /*
-            |--------------------------------------------------------------------------
-            | UPSERT QUERY
-            |--------------------------------------------------------------------------
-            |
-            | Agar setting_key already exist:
-            |     UPDATE
-            |
-            | Agar setting_key exist nahi:
-            |     INSERT
-            |
+            |------------------------------------------------------------------
+            | INSERT OR UPDATE
+            |------------------------------------------------------------------
+            | setting_key must have a UNIQUE index in the database.
             */
 
             $stmt = $conn->prepare("
                 INSERT INTO admin_settings
-                (
-                    setting_key,
-                    setting_value,
-                    setting_type,
-                    description
-                )
+                    (setting_key, setting_value, setting_type, description)
                 VALUES (?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     setting_value = VALUES(setting_value),
@@ -354,137 +331,69 @@ try {
             ");
 
             if (!$stmt) {
-                throw new Exception(
-                    "Failed to prepare settings query: " . $conn->error
-                );
+                throw new Exception("Failed to prepare settings query");
             }
 
-
-            $updatedSettings = [];
-
-
-            /*
-            |--------------------------------------------------------------------------
-            | PROCESS EACH SETTING
-            |--------------------------------------------------------------------------
-            */
+            $updatedCount = 0;
 
             foreach ($data["settings"] as $setting) {
 
-                /*
-                |------------------------------------------------------------------
-                | Required fields
-                |------------------------------------------------------------------
-                */
-
                 if (
-                    !isset($setting["setting_key"]) ||
-                    !isset($setting["setting_value"])
+                    !is_array($setting) ||
+                    !array_key_exists("setting_key", $setting) ||
+                    !array_key_exists("setting_value", $setting)
                 ) {
                     continue;
                 }
 
-
-                $settingKey = trim(
-                    (string) $setting["setting_key"]
-                );
-
-
-                /*
-                |------------------------------------------------------------------
-                | Empty key skip
-                |------------------------------------------------------------------
-                */
+                $settingKey = trim((string) $setting["setting_key"]);
 
                 if ($settingKey === "") {
                     continue;
                 }
 
+                $value = $setting["setting_value"];
 
-                /*
-                |------------------------------------------------------------------
-                | Setting value
-                |------------------------------------------------------------------
-                */
-
-                $settingValue = $setting["setting_value"];
-
-
-                /*
-                |------------------------------------------------------------------
-                | Convert array/object to JSON
-                |------------------------------------------------------------------
-                */
-
-                if (
-                    is_array($settingValue) ||
-                    is_object($settingValue)
-                ) {
-
+                if (is_array($value) || is_object($value)) {
                     $settingValue = json_encode(
-                        $settingValue,
+                        $value,
                         JSON_UNESCAPED_UNICODE
                     );
 
+                    if ($settingValue === false) {
+                        throw new Exception("Invalid setting value");
+                    }
+                } elseif (is_bool($value)) {
+                    $settingValue = $value ? "1" : "0";
+                } elseif ($value === null) {
+                    $settingValue = "";
                 } else {
-
-                    $settingValue = (string) $settingValue;
-
+                    $settingValue = (string) $value;
                 }
-
-
-                /*
-                |------------------------------------------------------------------
-                | Setting type
-                |------------------------------------------------------------------
-                */
 
                 $settingType = isset($setting["setting_type"])
                     ? trim((string) $setting["setting_type"])
                     : "text";
 
-
-                /*
-                |------------------------------------------------------------------
-                | Description
-                |------------------------------------------------------------------
-                */
-
                 $description = isset($setting["description"])
                     ? trim((string) $setting["description"])
                     : "";
 
+                // Normalize known boolean settings.
+                if (in_array($settingKey, [
+                    "maintenance_mode",
+                    "allow_registration",
+                    "allow_job_posting"
+                ], true)) {
 
-                /*
-                |------------------------------------------------------------------
-                | Boolean settings validation
-                |------------------------------------------------------------------
-                */
-
-                if (
-                    $settingKey === "maintenance_mode" ||
-                    $settingKey === "allow_registration" ||
-                    $settingKey === "allow_job_posting"
-                ) {
-
-                    $settingValue = (
-                        $settingValue === "1" ||
-                        $settingValue === "true" ||
-                        $settingValue === "on"
-                    )
-                        ? "1"
-                        : "0";
+                    $settingValue = in_array(
+                        strtolower($settingValue),
+                        ["1", "true", "on"],
+                        true
+                    ) ? "1" : "0";
 
                     $settingType = "boolean";
-
                 }
-
-
-                /*
-                |------------------------------------------------------------------
-                | Bind
-                |------------------------------------------------------------------
-                */
 
                 $stmt->bind_param(
                     "ssss",
@@ -494,142 +403,66 @@ try {
                     $description
                 );
 
-
-                /*
-                |------------------------------------------------------------------
-                | Execute
-                |------------------------------------------------------------------
-                */
-
                 if (!$stmt->execute()) {
-
-                    throw new Exception(
-                        "Failed to save setting: " . $settingKey
-                    );
-
+                    throw new Exception("Failed to save a setting");
                 }
 
-
-                $updatedSettings[] = [
-                    "setting_key"   => $settingKey,
-                    "setting_value" => $settingValue,
-                    "setting_type"  => $settingType,
-                    "description"   => $description
-                ];
-
+                $updatedCount++;
             }
-
 
             $stmt->close();
 
-
-            /*
-            |--------------------------------------------------------------------------
-            | COMMIT
-            |--------------------------------------------------------------------------
-            */
-
             $conn->commit();
 
-
-            /*
-            |--------------------------------------------------------------------------
-            | GET UPDATED SETTINGS
-            |--------------------------------------------------------------------------
-            */
-
-            $result = $conn->query("
-                SELECT
-                    id,
-                    setting_key,
-                    setting_value,
-                    setting_type,
-                    description,
-                    updated_at
-                FROM admin_settings
-                ORDER BY id ASC
-            ");
-
-
-            if (!$result) {
-                throw new Exception(
-                    "Settings saved but failed to reload data"
-                );
-            }
-
-
-            $allSettings = [];
-
-            while ($row = $result->fetch_assoc()) {
-                $allSettings[] = $row;
-            }
-
-
-            /*
-            |--------------------------------------------------------------------------
-            | SUCCESS RESPONSE
-            |--------------------------------------------------------------------------
-            */
-
-            echo json_encode([
-                "success" => true,
-                "message" => "Settings updated successfully",
-                "updated" => count($updatedSettings),
-                "settings" => $allSettings
-            ]);
-
-            exit;
-
-        } catch (Exception $e) {
-
-            /*
-            |--------------------------------------------------------------------------
-            | ROLLBACK
-            |--------------------------------------------------------------------------
-            */
+        } catch (Throwable $e) {
 
             $conn->rollback();
-
             throw $e;
-
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | RETURN UPDATED SETTINGS
+        |--------------------------------------------------------------------------
+        */
+
+        $result = $conn->query("
+            SELECT
+                id,
+                setting_key,
+                setting_value,
+                setting_type,
+                description,
+                updated_at
+            FROM admin_settings
+            ORDER BY id ASC
+        ");
+
+        if (!$result) {
+            throw new Exception("Settings saved, but reload failed");
+        }
+
+        $allSettings = [];
+
+        while ($row = $result->fetch_assoc()) {
+            $allSettings[] = $row;
+        }
+
+        sendJson(200, [
+            "success" => true,
+            "message" => "Settings updated successfully",
+            "updated" => $updatedCount,
+            "settings" => $allSettings
+        ]);
     }
 
+} catch (Throwable $e) {
 
-    /*
-    |--------------------------------------------------------------------------
-    | METHOD NOT ALLOWED
-    |--------------------------------------------------------------------------
-    */
+    error_log("Admin settings API error: " . $e->getMessage());
 
-    http_response_code(405);
-
-    echo json_encode([
+    sendJson(500, [
         "success" => false,
-        "message" => "Method not allowed"
+        "message" => "An internal server error occurred"
     ]);
-
-    exit;
-
-
-} catch (Exception $e) {
-
-    /*
-    |--------------------------------------------------------------------------
-    | SERVER ERROR
-    |--------------------------------------------------------------------------
-    */
-
-    http_response_code(500);
-
-    echo json_encode([
-        "success" => false,
-        "message" => $e->getMessage()
-    ]);
-
-    exit;
-
 }
-
 ?>
